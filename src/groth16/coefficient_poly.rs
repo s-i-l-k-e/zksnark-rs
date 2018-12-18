@@ -1,4 +1,5 @@
 use super::*;
+use std::ops::Deref;
 
 #[derive(Clone, PartialEq, Debug)]
 pub struct CoefficientPoly<T> {
@@ -11,14 +12,14 @@ impl<T> From<Vec<T>> for CoefficientPoly<T> {
     }
 }
 
-impl<T> Polynomial<T> for CoefficientPoly<T>
-where
-    T: Copy + Clone + PartialEq + Field,
-{
-    fn coefficients(&self) -> Vec<T> {
-        self.coeffs.clone()
+impl<T> Deref for CoefficientPoly<T> {
+    type Target = [T];
+    fn deref(&self) -> &Self::Target {
+        self.coeffs.deref()
     }
 }
+
+impl<T> Polynomial<T> for CoefficientPoly<T> where T: Field {}
 
 impl<T> Add for CoefficientPoly<T>
 where
@@ -105,23 +106,24 @@ where
         let max_deg = max(self.degree(), rhs.degree());
         let coeffs = (0..d)
             .map(|i| {
-                let self_iter = self.coeffs
+                let self_iter = self
+                    .coeffs
                     .as_slice()
                     .iter()
                     .rev()
                     .take(self.degree() + max_deg + 1 - i)
                     .skip(max(self.degree() as isize - i as isize, 0) as usize);
-                let rhs_iter = rhs.coeffs.as_slice().iter().take(i + 1).skip(max(
-                    i as isize - self.degree() as isize,
-                    0,
-                )
-                    as usize);
+                let rhs_iter =
+                    rhs.coeffs
+                        .as_slice()
+                        .iter()
+                        .take(i + 1)
+                        .skip(max(i as isize - self.degree() as isize, 0) as usize);
 
                 self_iter
                     .zip(rhs_iter)
                     .fold(T::from(0), |acc, (&a, &b)| acc + a * b)
-            })
-            .collect::<Vec<_>>();
+            }).collect::<Vec<_>>();
 
         CoefficientPoly { coeffs }
     }
@@ -207,7 +209,7 @@ mod tests {
     {
         fn is_zero(&self) -> bool {
             for &c in self.coeffs.as_slice() {
-                if c != T::add_identity() {
+                if c != T::zero() {
                     return false;
                 }
             }
@@ -298,7 +300,7 @@ mod tests {
 
         for _ in 0..1000 {
             polys.clear();
-            sum = vec![Z251::add_identity(); 3].into();
+            sum = vec![Z251::zero(); 3].into();
 
             for _ in 0..20 {
                 let a = CoefficientPoly::from(vec![
@@ -433,9 +435,9 @@ mod tests {
 
                 for j in 1..max {
                     if i == j {
-                        assert_eq!(poly.evaluate(j.into()), Z251::mul_identity());
+                        assert_eq!(poly.evaluate(j.into()), Z251::one());
                     } else {
-                        assert_eq!(poly.evaluate(j.into()), Z251::add_identity());
+                        assert_eq!(poly.evaluate(j.into()), Z251::zero());
                     }
                 }
             }
@@ -458,7 +460,7 @@ mod tests {
                         (i as usize + 2).into()
                     );
                 } else {
-                    assert_eq!(poly.evaluate((i as usize + 1).into()), Z251::add_identity());
+                    assert_eq!(poly.evaluate((i as usize + 1).into()), Z251::zero());
                 }
             }
         }
@@ -470,7 +472,7 @@ mod tests {
             let poly = root_poly((1..i).map(|x| Z251::from(x)));
 
             for j in 1..i {
-                assert_eq!(poly.evaluate(j.into()), Z251::add_identity());
+                assert_eq!(poly.evaluate(j.into()), Z251::zero());
             }
         }
     }

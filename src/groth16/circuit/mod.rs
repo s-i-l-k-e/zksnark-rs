@@ -1,13 +1,199 @@
-use self::ast::{Expression, ParseErr};
-use self::dummy_rep::DummyRep;
+//! The purpose of this module is to build circuits into a representation that
+//! can be turned into a `QAP` (Quadratic Arithmetic Program) which is defined
+//! in "groth16/mod.rs". I'll start this off by describing what are the building
+//! blocks for a `Circuit` are made of:
+//!
+//! # Sub Circuit
+//!
+//! You can think of a circuit as a collection of nodes connected by wires
+//! without any cycles (Directed Acyclic Graph). Nodes are made up of
+//! "sub circuit" which in reality look like this:
+//!
+//! ```
+//! // `Left` input wires-> \|/ \|  <- `Right` input wires
+//! //                       +   +  <- Plus operation
+//! //                        \ /   <- (implicit connections, not wires)
+//! //                         *    <- Multiplication operation
+//! //                         |    <- `Output` wire
+//! ```
+//!
+//! Lets walk through the example "sub circuit" which is the atomic unit of a
+//! `Circuit`. In this example the left plus operation has 3 input wires and the
+//! right plus operation has 2 input wires. Every plus operation must have at
+//! least one input wire, but may have any number of extra input wires. Each
+//! "wire" also has an associated weight and takes some input, unless it is an
+//! `Output` wire. The way the "sub circuit" is evaluated is by evaluating all
+//! input wires, followed by the plus operation and multiplication operation.
+//!
+//! ```
+//! // For Example, given the above "sub circuit" we can evaluate it as follows:
+//! //              We have these inputs and weights on the left wires:
+//! //                 - [(1,1), (2,0), (1,2)] : [(inputs, weights)]
+//!
+//! //              And here are the inputs and weights on the right wires:
+//! //                 - [(3,0), (0,1)] : [(inputs, weights)]
+//!
+//! //              To evaluate the wires we multiply their inputs by their weight:
+//! //              and then the plus operation adds the results together:
+//! //                 - Left plus operation equals => ((1 * 1) + (2 * 0) + (1 * 2))
+//! //                 - Right plus operation equals => ((3 * 0) + (0 * 1))
+//!
+//! //              Finally the multiplication operation multiplies the result
+//! //              of the previous two:
+//! //                 - (((1 * 1) + (2 * 0) + (1 * 2)) * ((3 * 0) + (0 * 1)))
+//! //              
+//! //              Thus the output wire would have the value: 0
+//! ```
+//!
+//! Note: A single wire may connect to any number of sub circuits including to the same
+//! sub circuit multiple times on both its left and right inputs. (Exception,
+//! wires must never form a loop anywhere in the `Circuit`)
+//!
+//! # `Circuit`
+//!
+//! A `Circuit` is made up of many connecting sub circuits. To evaluate a
+//! `Circuit` means to determine the value of the `Circuit`'s output wires.
+//! Which are in turn made up of the sub circuits output wires that do not
+//! connect to another sub circuit's input wires. This also means a `Circuit`
+//! has some number of input wires which come from the sub circuits with input
+//! wires that do not connect to other sub circuit's output wires. `Circuit`s
+//! are pure in the sense that the input uniquely determines the output of the
+//! `Circuit`.
+//!
+
 use super::super::field::*;
 use std::collections::HashMap;
 use std::str::FromStr;
 
 mod ast;
+mod builder;
 pub mod dummy_rep;
 
 use self::ast::TokenList;
+use self::ast::{Expression, ParseErr};
+use self::builder::{ConnectionType, SubCircuitId};
+use self::dummy_rep::DummyRep;
+
+pub use self::builder::{BinaryInput, Circuit, WireId, Word64, Word8};
+
+pub struct CircuitInstance<T, F>
+where
+    T: Copy,
+    F: Fn(SubCircuitId) -> T,
+{
+    circuit: Circuit<T>,
+    verification_wires: Vec<WireId>,
+    input_wires: Vec<WireId>,
+    ordered_wires: Vec<WireId>,
+    sub_circuit_point: F,
+}
+
+impl<T, F> CircuitInstance<T, F>
+where
+    T: Copy + Field,
+    F: Fn(SubCircuitId) -> T,
+{
+    pub fn new(
+        circuit: Circuit<T>,
+        verification_wires: Vec<WireId>,
+        input_wires: Vec<WireId>,
+        sub_circuit_point: F,
+    ) -> Self {
+        let mut ordered_wires = Vec::with_capacity(circuit.num_wires());
+        ordered_wires.push(circuit.unity_wire());
+
+        let (verification_ids, witness_ids) = circuit
+            .wire_assignments()
+            .keys()
+            .filter(|w| **w != circuit.unity_wire())
+            .partition::<Vec<_>, _>(|k| verification_wires.contains(k));
+
+        // Assign the wires that are to be verified to the lower indices
+        ordered_wires.append(
+            &mut verification_ids
+                .into_iter()
+                .chain(witness_ids.into_iter())
+                .collect::<Vec<_>>(),
+        );
+
+        CircuitInstance {
+            circuit,
+            verification_wires,
+            input_wires,
+            ordered_wires,
+            sub_circuit_point,
+        }
+    }
+
+    pub fn weights(&mut self, inputs: Vec<T>) -> Vec<T> {
+        if inputs.len() != self.input_wires.len() {
+            panic!("must have the same number of input wires and assignments")
+        }
+
+        // Set the values of the input wires of the circuit
+        for (wire, value) in self.input_wires.iter().zip(inputs.iter()) {
+            self.circuit.set_value(*wire, *value);
+        }
+
+        // Iterate through all of the wires and collect the values
+        let CircuitInstance {
+            ordered_wires,
+            circuit,
+            ..
+        } = self;
+
+        ordered_wires
+            .iter()
+            .map(|w| circuit.evaluate(*w))
+            .collect::<Vec<_>>()
+    }
+}
+
+impl<'a, T, F> From<&'a CircuitInstance<T, F>> for DummyRep<T>
+where
+    T: Field + Copy,
+    F: Fn(SubCircuitId) -> T,
+{
+    fn from(instance: &CircuitInstance<T, F>) -> Self {
+        use self::ConnectionType::*;
+
+        let mut u = vec![vec![]; instance.circuit.num_wires()];
+        let mut v = vec![vec![]; instance.circuit.num_wires()];
+        let mut w = vec![vec![]; instance.circuit.num_wires()];
+        let roots = instance
+            .circuit
+            .sub_circuits()
+            .map(&instance.sub_circuit_point)
+            .collect::<Vec<_>>();
+        let input = instance.verification_wires.len();
+
+        for wire in instance.ordered_wires.iter() {
+            let (mut ui, mut vi, mut wi) = (Vec::new(), Vec::new(), Vec::new());
+
+            for connection in instance.circuit.assignments(wire) {
+                match connection {
+                    Left(weight, sc_id) => ui.push(((instance.sub_circuit_point)(*sc_id), *weight)),
+                    Right(weight, sc_id) => {
+                        vi.push(((instance.sub_circuit_point)(*sc_id), *weight))
+                    }
+                    Output(sc_id) => wi.push(((instance.sub_circuit_point)(*sc_id), T::one())),
+                }
+            }
+
+            u.push(ui);
+            v.push(vi);
+            w.push(wi);
+        }
+
+        DummyRep {
+            u,
+            v,
+            w,
+            roots,
+            input,
+        }
+    }
+}
 
 pub trait RootRepresentation<F>
 where
@@ -337,10 +523,7 @@ where
     }
 }
 
-pub fn weights<F>(
-    code: &str,
-    values: &[F],
-) -> Result<Vec<F>, ParseErr>
+pub fn weights<F>(code: &str, values: &[F]) -> Result<Vec<F>, ParseErr>
 where
     F: Clone + Field + FromStr + PartialEq,
 {
@@ -445,7 +628,9 @@ where
             .expect("Every variable should have an assignment")
     });
 
-    Ok(::std::iter::once(F::mul_identity()).chain(weights).collect::<Vec<_>>())
+    Ok(::std::iter::once(F::one())
+        .chain(weights)
+        .collect::<Vec<_>>())
 }
 
 fn evaluate<F>(expression: &Expression<F>, assignments: &HashMap<String, F>) -> Option<F>
@@ -460,7 +645,7 @@ where
         Mul(ref left, ref right) => {
             evaluate(left, assignments).and_then(|l| evaluate(right, assignments).map(|r| l * r))
         }
-        Add(ref inputs) => inputs.into_iter().try_fold(F::add_identity(), |acc, x| {
+        Add(ref inputs) => inputs.into_iter().try_fold(F::zero(), |acc, x| {
             evaluate(&x, assignments).map(|v| acc + v)
         }),
         _ => None,

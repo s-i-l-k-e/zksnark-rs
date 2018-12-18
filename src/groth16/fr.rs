@@ -1,7 +1,7 @@
 extern crate bn;
 extern crate rand;
 
-use self::bn::{Fr, G1, G2, Group, Gt};
+use self::bn::{Fr, Group, Gt, G1, G2};
 pub use super::*;
 use std::str::FromStr;
 
@@ -55,16 +55,18 @@ impl Div for FrLocal {
     }
 }
 
+impl FieldIdentity for FrLocal {
+    fn zero() -> Self {
+        FrLocal(Fr::zero())
+    }
+    fn one() -> Self {
+        FrLocal(Fr::one())
+    }
+}
+
 impl Field for FrLocal {
     fn mul_inv(self) -> Self {
         FrLocal(self.0.inverse().expect("Tried to get mul inv of zero"))
-    }
-
-    fn add_identity() -> Self {
-        FrLocal(Fr::zero())
-    }
-    fn mul_identity() -> Self {
-        FrLocal(Fr::one())
     }
 }
 
@@ -122,7 +124,7 @@ impl EllipticEncryptable for FrLocal {
 
 impl Identity for FrLocal {
     fn is_identity(&self) -> bool {
-        *self == Self::add_identity()
+        *self == Self::zero()
     }
 }
 
@@ -131,7 +133,7 @@ impl Sum for FrLocal {
     where
         I: Iterator<Item = Self>,
     {
-        iter.fold(FrLocal::add_identity(), |acc, x| acc + x)
+        iter.fold(FrLocal::zero(), |acc, x| acc + x)
     }
 }
 
@@ -260,8 +262,7 @@ mod tests {
 
             let proof = prove(&qap, (&sigmag1, &sigmag2), &weights);
 
-            assert!(verify(
-                &qap,
+            assert!(verify::<CoefficientPoly<FrLocal>, _, _, _, _>(
                 (sigmag1, sigmag2),
                 &vec![FrLocal::from(51), FrLocal::from(3)],
                 proof
@@ -271,10 +272,9 @@ mod tests {
 
     #[test]
     fn bn_encrypt_quad_test() {
-        let root_rep = ASTParser::try_parse(&*::std::fs::read_to_string(
-            "test_programs/lispesque_quad.zk",
-        ).unwrap())
-            .unwrap();
+        let root_rep = ASTParser::try_parse(
+            &*::std::fs::read_to_string("test_programs/lispesque_quad.zk").unwrap(),
+        ).unwrap();
         let qap: QAP<CoefficientPoly<FrLocal>> = root_rep.into();
 
         for _ in 0..10 {
@@ -293,16 +293,19 @@ mod tests {
 
             let proof = prove(&qap, (&sigmag1, &sigmag2), &weights);
 
-            assert!(verify(&qap, (sigmag1, sigmag2), &vec![x, share], proof));
+            assert!(verify::<CoefficientPoly<FrLocal>, _, _, _, _>(
+                (sigmag1, sigmag2),
+                &vec![x, share],
+                proof
+            ));
         }
     }
 
     #[test]
     fn bn_encrypt_cubic_test() {
-        let root_rep = ASTParser::try_parse(&*::std::fs::read_to_string(
-            "test_programs/lispesque_cubic.zk",
-        ).unwrap())
-            .unwrap();
+        let root_rep = ASTParser::try_parse(
+            &*::std::fs::read_to_string("test_programs/lispesque_cubic.zk").unwrap(),
+        ).unwrap();
         let qap: QAP<CoefficientPoly<FrLocal>> = root_rep.into();
 
         let trials = 10;
@@ -342,7 +345,11 @@ mod tests {
             proof_time += now.elapsed().subsec_millis();
 
             let now = Instant::now();
-            assert!(verify(&qap, (sigmag1, sigmag2), &vec![x, share], proof));
+            assert!(verify::<CoefficientPoly<FrLocal>, _, _, _, _>(
+                (sigmag1, sigmag2),
+                &vec![x, share],
+                proof
+            ));
             verify_time += now.elapsed().subsec_millis();
         }
 
@@ -395,7 +402,11 @@ mod tests {
             proof_time += now.elapsed().subsec_millis();
 
             let now = Instant::now();
-            assert!(verify(&qap, (sigmag1, sigmag2), &weights[1..3], proof));
+            assert!(verify::<CoefficientPoly<FrLocal>, _, _, _, _>(
+                (sigmag1, sigmag2),
+                &weights[1..3],
+                proof
+            ));
             verify_time += now.elapsed().subsec_millis();
         }
 
